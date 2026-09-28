@@ -17,9 +17,9 @@ class YouTubeAdapter(PlatformAdapter):
     def __init__(self, pipeline: CandidatePipeline):
         self.pipeline = pipeline
 
-    def search(self, query: str) -> None:
-        """Search YouTube and store newly discovered candidates."""
-        self.pipeline.search(query)
+    def search(self, query: str) -> list:
+        """Search YouTube and return newly discovered candidates."""
+        return self.pipeline.search(query)
 
     def scroll(self) -> None:
         raise UnsupportedOperationError(

@@ -132,8 +132,11 @@ class Agent:
 
     def execute(self, action: AgentAction) -> None:
         """
-        Validate an action, execute it through the platform adapter,
-        and create an observation when appropriate.
+        Execute one high-level agent action.
+
+        Planner-selected actions normally originate from OBSERVE.
+        In that case the agent explicitly passes through DECIDE before
+        entering the selected action state.
         """
 
         transitions = {
@@ -151,18 +154,29 @@ class Agent:
 
         target_state = transitions[action.type]
 
-        # Validate the transition before touching the platform.
+        if self.state == AgentState.OBSERVE:
+            self.transition(AgentState.DECIDE)
+
         self.transition(target_state)
 
         if action.type == ActionType.SEARCH:
             if action.value is None:
                 raise ValueError("SEARCH action requires a query")
 
-            self.adapter.search(action.value)
+            candidates = self.adapter.search(action.value)
+            candidate_ids = [
+                candidate.video_id
+                for candidate in candidates
+            ]
+
             self.transition(AgentState.OBSERVE)
 
             self._create_observation(
                 topic=action.value,
+                candidates=candidate_ids,
+                metadata={
+                    "candidate_count": len(candidates),
+                },
             )
 
         elif action.type == ActionType.OPEN:
@@ -170,6 +184,7 @@ class Agent:
                 raise ValueError("OPEN action requires an item ID")
 
             self.adapter.open(action.value)
+
             self.transition(AgentState.OBSERVE)
 
             self._create_observation(
@@ -178,6 +193,7 @@ class Agent:
 
         elif action.type == ActionType.SCROLL:
             self.adapter.scroll()
+
             self.transition(AgentState.OBSERVE)
 
             self._create_observation()
@@ -186,18 +202,65 @@ class Agent:
             if action.value is None:
                 raise ValueError("EXPLORE action requires a topic")
 
-            self.adapter.search(action.value)
+            candidates = self.adapter.search(action.value)
+            candidate_ids = [
+                candidate.video_id
+                for candidate in candidates
+            ]
+
             self.transition(AgentState.SEARCH)
 
             self._create_observation(
                 topic=action.value,
+                candidates=candidate_ids,
+                metadata={
+                    "candidate_count": len(candidates),
+                },
             )
 
         elif action.type == ActionType.WAIT:
             self.adapter.wait()
+
             self.transition(AgentState.OBSERVE)
 
             self._create_observation()
 
         elif action.type == ActionType.STOP:
             return
+
+    def run(
+        self,
+        planner,
+        initial_action: AgentAction,
+        max_steps: int = 10,
+    ) -> None:
+        """
+        Run a bounded planner-action-observation loop.
+
+        The planner chooses the next action from the latest observation.
+        Execution continues until a terminal state is reached or the
+        maximum number of steps is exhausted.
+        """
+
+        action = initial_action
+
+        for _ in range(max_steps):
+            self.execute(action)
+
+            if self.state in {
+                AgentState.STOPPED,
+                AgentState.SESSION_COMPLETE,
+                AgentState.ERROR,
+                AgentState.AUTH_REQUIRED,
+                AgentState.RATE_LIMITED,
+            }:
+                return
+
+            observation = self.get_observation()
+
+            if observation is None:
+                raise RuntimeError(
+                    "Agent has no observation after executing an action"
+                )
+
+            action = planner.decide(observation)
