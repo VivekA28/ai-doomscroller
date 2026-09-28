@@ -322,6 +322,17 @@ Keep action outputs structured and validated.
 
 The LLM should **not** directly execute arbitrary browser commands.
 
+### Implemented planner layer
+
+- `backend/src/planner.py` implements the current deterministic planner.
+- The planner consumes the normalized `Observation` object and returns an
+  `AgentAction`.
+- The current planner intentionally chooses the first candidate for the
+  initial integration test; it is a placeholder for the future LLM-backed
+  planner.
+- Candidate IDs are now carried from the YouTube pipeline into the
+  observation and then into the planner-selected `OPEN` action.
+
 ------------------------------------------------------------------------
 
 # 7. Observer
@@ -651,20 +662,36 @@ Do not display private chain-of-thought.
 ## Phase 2 --- Agent Core
 
 -   [x] Agent state machine
--   [ ] Planner
+-   [x] Deterministic planner
+-   [x] Planner receives normalized observations and returns structured actions
 -   [ ] Tool interface
 -   [ ] Session state
 -   [x] Action validation
 -   [ ] Error handling
 -   [ ] Pause/resume/stop
 
+### Agent core implementation checkpoint
+
+- Implemented the full `Agent` state machine.
+- Implemented structured `AgentAction` and action validation.
+- Implemented normalized `Observation` objects.
+- Implemented `PlatformAdapter` abstraction and `YouTubeAdapter`.
+- Fixed the planner transition path to explicitly use:
+  `OBSERVE -> DECIDE -> selected action -> OBSERVE`.
+- Implemented a bounded planner/action/observation loop through
+  `Agent.run(...)`.
+- End-to-end integration test passed: YouTube search returned 10 real
+  candidate IDs, the planner selected one, and the agent successfully
+  executed `OPEN` and returned to `OBSERVE`.
+- Latest successful integration test consumed 102 local quota units.
+
 ## Phase 3 --- Platform Integration
 
 -   [x] Platform adapter interface
 -   [x] Short-form candidate/filtering layer
--   [ ] First real platform adapter
--   [ ] Authorized authentication
--   [ ] Search/navigation
+-   [x] First real platform adapter (YouTube Data API discovery adapter)
+-   [x] Authorized API-key configuration for YouTube discovery
+-   [x] Search/discovery through the YouTube Data API
 -   [ ] Content retrieval/display
 -   [ ] Next-content navigation
 -   [ ] Rate-limit handling
@@ -874,35 +901,22 @@ The final product should feel like:
 
 # 20. Immediate Next Task
 
-**Do not start coding the agent yet.**
+### LLM-backed planner
 
-First complete:
+Replace the deterministic planner with an LLM-backed planner while
+preserving the same validated `AgentAction` interface. The LLM should
+receive normalized observations and return only an allowed structured
+action.
 
-### Platform Feasibility Research
+Before expanding into browser/UI automation, keep the current YouTube
+API limitations explicit: the Data API supports discovery and metadata,
+but does not provide browser-style Shorts/feed scrolling or back
+navigation. Do not fake those capabilities or bypass platform
+restrictions.
 
-Research Instagram and YouTube separately and create:
-
-``` text
-docs/platform-research.md
-```
-
-For each platform answer:
-
-1.  What official APIs exist?
-2.  What content can they return?
-3.  Can we search by keyword?
-4.  Can we obtain Shorts/Reels?
-5.  Can we display the content in our application?
-6.  Can we navigate through content?
-7.  What authentication is required?
-8.  What automation is permitted?
-9.  What are the rate limits?
-10. What are the relevant restrictions?
-11. What capabilities are impossible through official interfaces?
-12. What architecture should we use given those limitations?
-
-Only after this decision should we lock the platform integration
-architecture.
+After the planner, the next major layer is authorized content
+observation/understanding (text, metadata, frames where permitted),
+followed by a permitted live content interface when one is available.
 
 ------------------------------------------------------------------------
 
@@ -914,6 +928,12 @@ architecture.
 
 **Current goal:** Build a real autonomous short-form-content
 doomscrolling agent with a live view of its actions.
+
+
+**Current implementation milestone:** The agent core, deterministic
+planner, YouTube discovery adapter, normalized observations, structured
+actions, and bounded planner/action/observation loop are working
+together end-to-end.
 
 ## Completed so far
 
