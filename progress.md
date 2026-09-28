@@ -628,38 +628,40 @@ Do not display private chain-of-thought.
 
 ## Phase 0 --- Feasibility
 
--   [ ] Research Instagram official API capabilities
--   [ ] Research YouTube official API capabilities
--   [ ] Determine permitted navigation/automation options
--   [ ] Determine authentication requirements
--   [ ] Determine content-display/caching requirements
--   [ ] Select first supported platform
--   [ ] Document limitations
+-   [x] Research Instagram official API capabilities
+-   [x] Research YouTube official API capabilities
+-   [x] Determine permitted navigation/automation options
+-   [x] Determine authentication requirements
+-   [x] Determine content-display/caching requirements
+-   [x] Select first supported platform
+-   [x] Document limitations
 
 ## Phase 1 --- Foundations
 
--   [ ] Python project structure
--   [ ] Git repository
--   [ ] Configuration management
+-   [x] Python project structure
+-   [x] Git repository
+-   [x] Configuration management
 -   [ ] Logging
 -   [ ] Basic FastAPI backend
 -   [ ] Basic frontend
 -   [ ] LLM API integration
--   [ ] Structured agent actions
+-   [x] Structured agent actions
+-   [x] Local API quota accounting
 
 ## Phase 2 --- Agent Core
 
--   [ ] Agent state machine
+-   [x] Agent state machine
 -   [ ] Planner
 -   [ ] Tool interface
 -   [ ] Session state
--   [ ] Action validation
+-   [x] Action validation
 -   [ ] Error handling
 -   [ ] Pause/resume/stop
 
 ## Phase 3 --- Platform Integration
 
--   [ ] Platform adapter interface
+-   [x] Platform adapter interface
+-   [x] Short-form candidate/filtering layer
 -   [ ] First real platform adapter
 -   [ ] Authorized authentication
 -   [ ] Search/navigation
@@ -982,7 +984,9 @@ and metadata retrieval are functioning end-to-end.
 
 ## Immediate next task
 
-The **Shorts candidate/filtering layer is implemented and tested**.
+The **Shorts candidate/filtering layer, quota layer, and deterministic agent-control foundation are implemented and tested**.
+
+Next work should continue from the platform adapter layer; the actual YouTube adapter/execution layer is not implemented yet.
 
 ### Completed: Short-form candidate layer
 
@@ -1030,6 +1034,36 @@ Visual evidence will be added later.
 
 The candidate/filtering layer is now implemented and tested.
 
+### Agent core foundation
+
+Implemented and independently tested:
+
+- `src/agent_state.py`
+  - Explicit agent state enum covering search, observation, decision, navigation, errors, rate limiting, pause/stop, and session completion.
+- `src/agent.py`
+  - Deterministic state-transition validation.
+  - `execute()` validates high-level actions before changing state.
+  - Invalid transitions are rejected with `InvalidTransitionError`.
+- `src/agent_action.py`
+  - Structured `ActionType` enum and `AgentAction` dataclass.
+  - Actions currently include search, scroll, open, back, explore, wait, and stop.
+- `src/platform_adapter.py`
+  - Abstract platform interface for search, scroll, open, back, and wait.
+
+### Quota management
+
+Implemented and tested:
+
+- `src/quota.py`
+  - Local YouTube quota budget tracker.
+  - Tracks estimated costs for `search.list` and `videos.list`.
+  - Exposes remaining budget and status.
+  - Raises `QuotaExceededError` when the local budget would be exceeded.
+- `YouTubeClient` now accounts for quota usage for search and metadata calls.
+- `CandidatePipeline.quota_status()` exposes current quota state to the future agent.
+
+This is a local safety/accounting layer, not Google's authoritative quota state.
+
 ### Current data flow
 
 ``` text
@@ -1061,4 +1095,4 @@ Shorts classification. It is an initial short-form candidate heuristic.
 The later platform/content layer can add stronger signals where available.
 
 **Do not:** Start with a fake feed, generic chatbot, uncontrolled scraper,
-or LLM-controlled arbitrary browser commands.
+or LLM-controlled arbitrary browser commands. The LLM/decision layer is still intentionally deferred until the deterministic control and platform execution boundaries are established.

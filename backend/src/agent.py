@@ -1,5 +1,7 @@
 from src.agent_action import ActionType, AgentAction
 from src.agent_state import AgentState
+from src.observation import Observation
+from src.platform_adapter import PlatformAdapter
 
 
 class InvalidTransitionError(Exception):
@@ -10,8 +12,8 @@ class Agent:
     """
     Controls the high-level state of the doomscrolling agent.
 
-    The agent state machine is deterministic.
-    Decision-making will be added separately later.
+    The agent validates actions, delegates platform operations,
+    and produces normalized observations.
     """
 
     VALID_TRANSITIONS = {
@@ -79,13 +81,14 @@ class Agent:
         AgentState.SESSION_COMPLETE: set(),
     }
 
-    def __init__(self):
+    def __init__(self, adapter: PlatformAdapter):
         self.state = AgentState.IDLE
+        self.adapter = adapter
+        self.last_observation: Observation | None = None
 
     def transition(self, new_state: AgentState) -> None:
-        """
-        Move to a new state if the transition is valid.
-        """
+        """Move to a new state if the transition is valid."""
+
         allowed = self.VALID_TRANSITIONS[self.state]
 
         if new_state not in allowed:
@@ -98,13 +101,39 @@ class Agent:
 
     def get_state(self) -> AgentState:
         """Return the current agent state."""
+
         return self.state
+
+    def get_observation(self) -> Observation | None:
+        """Return the most recent observation."""
+
+        return self.last_observation
+
+    def _create_observation(
+        self,
+        *,
+        topic: str | None = None,
+        current_item_id: str | None = None,
+        candidates: list[str] | None = None,
+        metadata: dict | None = None,
+    ) -> Observation:
+        """Create and store the current normalized observation."""
+
+        observation = Observation(
+            state=self.state.value,
+            topic=topic,
+            current_item_id=current_item_id,
+            candidates=candidates or [],
+            metadata=metadata or {},
+        )
+
+        self.last_observation = observation
+        return observation
 
     def execute(self, action: AgentAction) -> None:
         """
-        Validate and apply a high-level agent action.
-
-        Actual platform execution will be added later.
+        Validate an action, execute it through the platform adapter,
+        and create an observation when appropriate.
         """
 
         transitions = {
@@ -117,9 +146,58 @@ class Agent:
         }
 
         if action.type == ActionType.BACK:
-            raise InvalidTransitionError(
-                "BACK execution is not implemented yet"
-            )
+            self.adapter.back()
+            return
 
         target_state = transitions[action.type]
+
+        # Validate the transition before touching the platform.
         self.transition(target_state)
+
+        if action.type == ActionType.SEARCH:
+            if action.value is None:
+                raise ValueError("SEARCH action requires a query")
+
+            self.adapter.search(action.value)
+            self.transition(AgentState.OBSERVE)
+
+            self._create_observation(
+                topic=action.value,
+            )
+
+        elif action.type == ActionType.OPEN:
+            if action.value is None:
+                raise ValueError("OPEN action requires an item ID")
+
+            self.adapter.open(action.value)
+            self.transition(AgentState.OBSERVE)
+
+            self._create_observation(
+                current_item_id=action.value,
+            )
+
+        elif action.type == ActionType.SCROLL:
+            self.adapter.scroll()
+            self.transition(AgentState.OBSERVE)
+
+            self._create_observation()
+
+        elif action.type == ActionType.EXPLORE:
+            if action.value is None:
+                raise ValueError("EXPLORE action requires a topic")
+
+            self.adapter.search(action.value)
+            self.transition(AgentState.SEARCH)
+
+            self._create_observation(
+                topic=action.value,
+            )
+
+        elif action.type == ActionType.WAIT:
+            self.adapter.wait()
+            self.transition(AgentState.OBSERVE)
+
+            self._create_observation()
+
+        elif action.type == ActionType.STOP:
+            return
