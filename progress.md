@@ -644,16 +644,16 @@ Do not display private chain-of-thought.
 -   [ ] Logging
 -   [ ] Basic FastAPI backend
 -   [ ] Basic frontend
--   [ ] LLM API integration
+-   [x] LLM API integration
 -   [x] Structured agent actions
 -   [x] Local API quota accounting
 
 ## Phase 2 --- Agent Core
 
 -   [x] Agent state machine
--   [ ] Planner
+-   [x] Planner
 -   [ ] Tool interface
--   [ ] Session state
+-   [x] Session state
 -   [x] Action validation
 -   [ ] Error handling
 -   [ ] Pause/resume/stop
@@ -874,35 +874,29 @@ The final product should feel like:
 
 # 20. Immediate Next Task
 
-**Do not start coding the agent yet.**
+Platform feasibility research established YouTube as the first integration target.
+The deterministic candidate/data layer, agent state machine, session state,
+and LLM planner integration are implemented and tested.
 
-First complete:
+Next focus:
 
-### Platform Feasibility Research
+### Platform Adapter / Execution Boundary
 
-Research Instagram and YouTube separately and create:
+Build the next deterministic layer between the planner and the real platform:
 
-``` text
-docs/platform-research.md
-```
+1. Keep all platform-specific operations behind `PlatformAdapter`.
+2. Define the execution contract for `SEARCH`, `OPEN`, `SCROLL`, `BACK`, `WAIT`,
+   `EXPLORE`, and `STOP`.
+3. Connect the existing YouTube candidate/content layer to the adapter cleanly.
+4. Add deterministic handling for unsupported operations instead of allowing
+   the planner to issue arbitrary platform commands.
+5. Add error, rate-limit, and authentication-required handling at the adapter
+   boundary.
+6. Test the adapter independently before introducing live UI/browser control.
 
-For each platform answer:
-
-1.  What official APIs exist?
-2.  What content can they return?
-3.  Can we search by keyword?
-4.  Can we obtain Shorts/Reels?
-5.  Can we display the content in our application?
-6.  Can we navigate through content?
-7.  What authentication is required?
-8.  What automation is permitted?
-9.  What are the rate limits?
-10. What are the relevant restrictions?
-11. What capabilities are impossible through official interfaces?
-12. What architecture should we use given those limitations?
-
-Only after this decision should we lock the platform integration
-architecture.
+The goal of this step is to make the planner capable of producing validated
+high-level actions while the adapter remains the only layer allowed to perform
+platform operations.
 
 ------------------------------------------------------------------------
 
@@ -910,10 +904,12 @@ architecture.
 
 **Project:** AI Doomscroller
 
-**Status:** Foundations / first platform integration
+**Status:** Foundations complete / first platform integration in progress
 
 **Current goal:** Build a real autonomous short-form-content
 doomscrolling agent with a live view of its actions.
+
+**Latest checkpoint:** 35/35 offline tests passing after hardening Agent/Planner session integration and graceful PlannerError handling.
 
 ## Completed so far
 
@@ -984,9 +980,35 @@ and metadata retrieval are functioning end-to-end.
 
 ## Immediate next task
 
-The **Shorts candidate/filtering layer, quota layer, and deterministic agent-control foundation are implemented and tested**.
+The **Shorts candidate/filtering layer, quota layer, deterministic agent-control foundation, session state, and LLM planner integration are implemented and tested**.
 
-Next work should continue from the platform adapter layer; the actual YouTube adapter/execution layer is not implemented yet.
+Next work should continue from the **platform adapter / execution boundary**. The current YouTube adapter exposes the platform interface and candidate/content operations, but full scrolling/navigation execution is not implemented yet.
+
+
+### Latest Agent/Planner hardening checkpoint
+
+Implemented and tested:
+
+- `STOP` can be executed from `IDLE` without an existing `SessionState`.
+- Session action recording is guarded when no session exists.
+- Successful `OPEN` operations record the item as seen even when the platform adapter returns no metadata (`None`).
+- `Agent.run()` handles `PlannerError` explicitly, transitions to `ERROR`, and terminates the run cleanly instead of propagating the planner error unhandled.
+- `test_planner.py` can be executed directly from the `backend` directory without a `src` import-path failure.
+- Planner session integration has explicit tests for filtering seen candidates, including the session snapshot, and rejecting already-seen `OPEN` targets.
+
+Validation:
+
+``` text
+python3 tests/test_planner.py
+Ran 11 tests
+OK
+
+python3 -m unittest discover -s . -p 'test_*.py' -v
+Ran 35 tests
+OK
+```
+
+The full offline suite currently passes **35/35 tests**.
 
 ### Completed: Short-form candidate layer
 
@@ -1033,6 +1055,41 @@ Visual evidence will be added later.
   - Total unique candidates: 8
 
 The candidate/filtering layer is now implemented and tested.
+
+### Agent loop + session state
+
+Implemented and tested:
+
+- `src/agent.py` provides a bounded planner → action → observation loop.
+- The end-to-end offline agent tests use scripted/mocked planners, so the suite does not require an OpenAI API key.
+- `src/session_state.py` provides deterministic per-session memory for the goal, current topic, seen item IDs, searched topics, discovered topics, and action history.
+- Session state has focused mutation/query methods and a JSON-safe `to_dict()` snapshot for planner/UI use.
+- Search and discovered-topic deduplication are case-insensitive.
+- The agent records executed actions and session items.
+- The agent rejects reopening an item that has already been viewed in the current session.
+- The planner receives a read-only session snapshot and filters already-seen candidates before presenting them to the LLM.
+- The planner also rejects an `OPEN` action targeting an already-seen item as a second deterministic validation boundary.
+
+Session state is now integrated with the agent and planner. The LLM can consume session context but does not directly mutate session memory.
+
+### LLM Planner
+
+Implemented:
+
+- `src/planner.py` now provides the LLM-backed `Planner` using the OpenAI Responses API.
+- The planner keeps the existing `Planner.decide(observation) -> AgentAction` contract.
+- LLM output is constrained to the existing `ActionType` values and `{action, value}` schema.
+- `OPEN` targets are validated against the current observation candidate list.
+- Actions that require values (`SEARCH`, `EXPLORE`, `OPEN`) and actions that must not have values (`SCROLL`, `BACK`, `WAIT`, `STOP`) are validated before returning.
+- Non-`observe` states stop without making an LLM call.
+- The LLM client is dependency-injected, allowing completely offline planner tests.
+- The default model can be configured with `DOOMSCROLLER_PLANNER_MODEL`; the current default is `gpt-5.6-luna`.
+- The planner does not receive or execute arbitrary browser commands.
+
+### Planner validation
+
+- `test_planner.py` covers valid actions, malformed JSON, unknown actions, invalid targets, invalid values, controlled planner input, non-observe behavior, session snapshots, filtering of seen candidates, and rejection of reopening seen items.
+- The planner remains dependency-injected for completely offline tests.
 
 ### Agent core foundation
 
@@ -1084,8 +1141,10 @@ new-candidate pipeline
 future ranking / agent decision
 ```
 
-This is still **not the agent loop**. We are deliberately building and
-testing the deterministic platform/data layer first.
+The bounded agent loop and planner integration now exist and are tested,
+but the project is **not yet a real live doomscrolling agent**. The remaining
+core work is to connect the deterministic control loop to an authorized platform
+execution layer and eventually expose that activity through the live UI.
 
 
 ## Important design decision
@@ -1095,4 +1154,6 @@ Shorts classification. It is an initial short-form candidate heuristic.
 The later platform/content layer can add stronger signals where available.
 
 **Do not:** Start with a fake feed, generic chatbot, uncontrolled scraper,
-or LLM-controlled arbitrary browser commands. The LLM/decision layer is still intentionally deferred until the deterministic control and platform execution boundaries are established.
+or LLM-controlled arbitrary browser commands. The LLM/decision layer now
+exists behind structured action validation, but platform execution must still
+remain behind the deterministic adapter/tool boundary.

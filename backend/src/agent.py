@@ -2,6 +2,8 @@ from src.agent_action import ActionType, AgentAction
 from src.agent_state import AgentState
 from src.observation import Observation
 from src.platform_adapter import PlatformAdapter
+from src.planner import PlannerError
+from src.session_state import SessionState
 
 
 class InvalidTransitionError(Exception):
@@ -9,124 +11,53 @@ class InvalidTransitionError(Exception):
 
 
 class Agent:
-    """
-    Controls the high-level state of the doomscrolling agent.
-
-    The agent validates actions, delegates platform operations,
-    and produces normalized observations.
-    """
+    """Controls state, executes permitted actions, and owns session memory."""
 
     VALID_TRANSITIONS = {
-        AgentState.IDLE: {
-            AgentState.SEARCH,
-            AgentState.STOPPED,
-        },
-        AgentState.SEARCH: {
-            AgentState.OBSERVE,
-            AgentState.ERROR,
-            AgentState.RATE_LIMITED,
-            AgentState.AUTH_REQUIRED,
-            AgentState.STOPPED,
-        },
-        AgentState.OBSERVE: {
-            AgentState.DECIDE,
-            AgentState.ERROR,
-            AgentState.STOPPED,
-        },
-        AgentState.DECIDE: {
-            AgentState.SCROLL,
-            AgentState.OPEN,
-            AgentState.EXPLORE,
-            AgentState.WAIT,
-            AgentState.OBSERVE,
-            AgentState.STOPPED,
-            AgentState.SESSION_COMPLETE,
-        },
-        AgentState.SCROLL: {
-            AgentState.OBSERVE,
-            AgentState.ERROR,
-            AgentState.STOPPED,
-        },
-        AgentState.OPEN: {
-            AgentState.OBSERVE,
-            AgentState.ERROR,
-            AgentState.STOPPED,
-        },
-        AgentState.EXPLORE: {
-            AgentState.OBSERVE,
-            AgentState.ERROR,
-            AgentState.RATE_LIMITED,
-            AgentState.AUTH_REQUIRED,
-            AgentState.STOPPED,
-        },
-        AgentState.WAIT: {
-            AgentState.OBSERVE,
-            AgentState.STOPPED,
-        },
-        AgentState.PAUSED: {
-            AgentState.OBSERVE,
-            AgentState.STOPPED,
-        },
-        AgentState.ERROR: {
-            AgentState.IDLE,
-            AgentState.STOPPED,
-        },
-        AgentState.AUTH_REQUIRED: {
-            AgentState.IDLE,
-            AgentState.STOPPED,
-        },
-        AgentState.RATE_LIMITED: {
-            AgentState.WAIT,
-            AgentState.STOPPED,
-        },
+        AgentState.IDLE: {AgentState.SEARCH, AgentState.STOPPED},
+        AgentState.SEARCH: {AgentState.OBSERVE, AgentState.ERROR, AgentState.RATE_LIMITED, AgentState.AUTH_REQUIRED, AgentState.STOPPED},
+        AgentState.OBSERVE: {AgentState.DECIDE, AgentState.ERROR, AgentState.STOPPED},
+        AgentState.DECIDE: {AgentState.SCROLL, AgentState.OPEN, AgentState.EXPLORE, AgentState.WAIT, AgentState.OBSERVE, AgentState.STOPPED, AgentState.SESSION_COMPLETE},
+        AgentState.SCROLL: {AgentState.OBSERVE, AgentState.ERROR, AgentState.STOPPED},
+        AgentState.OPEN: {AgentState.OBSERVE, AgentState.ERROR, AgentState.STOPPED},
+        AgentState.EXPLORE: {AgentState.OBSERVE, AgentState.ERROR, AgentState.RATE_LIMITED, AgentState.AUTH_REQUIRED, AgentState.STOPPED},
+        AgentState.WAIT: {AgentState.OBSERVE, AgentState.STOPPED},
+        AgentState.PAUSED: {AgentState.OBSERVE, AgentState.STOPPED},
+        AgentState.ERROR: {AgentState.IDLE, AgentState.STOPPED},
+        AgentState.AUTH_REQUIRED: {AgentState.IDLE, AgentState.STOPPED},
+        AgentState.RATE_LIMITED: {AgentState.WAIT, AgentState.STOPPED},
         AgentState.STOPPED: set(),
         AgentState.SESSION_COMPLETE: set(),
     }
 
-    def __init__(self, adapter: PlatformAdapter):
+    def __init__(self, adapter: PlatformAdapter, session: SessionState | None = None):
         self.state = AgentState.IDLE
         self.adapter = adapter
+        self.session = session
         self.last_observation: Observation | None = None
 
     def transition(self, new_state: AgentState) -> None:
-        """Move to a new state if the transition is valid."""
         allowed = self.VALID_TRANSITIONS[self.state]
-
         if new_state not in allowed:
             raise InvalidTransitionError(
                 f"Invalid transition: {self.state.value} -> {new_state.value}"
             )
-
         self.state = new_state
 
     def get_state(self) -> AgentState:
-        """Return the current agent state."""
         return self.state
 
     def get_observation(self) -> Observation | None:
-        """Return the most recent observation."""
         return self.last_observation
 
     _UNSET = object()
 
-    def _create_observation(
-        self,
-        *,
-        topic: str | None | object = _UNSET,
-        current_item_id: str | None | object = _UNSET,
-        candidates: list[str] | None | object = _UNSET,
-        metadata: dict | None | object = _UNSET,
-        preserve: bool = False,
-    ) -> Observation:
-        """
-        Create and store the current normalized observation.
-
-        When preserve=True, fields not supplied by the current action are
-        carried forward from the previous observation. This prevents actions
-        such as OPEN, WAIT, and BACK from silently erasing session context.
-        """
+    def _create_observation(self, *, topic: str | None | object = _UNSET,
+                            current_item_id: str | None | object = _UNSET,
+                            candidates: list[str] | None | object = _UNSET,
+                            metadata: dict | None | object = _UNSET,
+                            preserve: bool = False) -> Observation:
         previous = self.last_observation
-
         if preserve and previous is not None:
             if topic is self._UNSET:
                 topic = previous.topic
@@ -157,18 +88,14 @@ class Agent:
             candidates=candidates,
             metadata=metadata,
         )
-
         self.last_observation = observation
         return observation
 
-    def execute(self, action: AgentAction) -> None:
-        """
-        Execute one high-level agent action.
+    def _ensure_session(self, goal: str) -> None:
+        if self.session is None:
+            self.session = SessionState(goal=goal)
 
-        Planner-selected actions normally originate from OBSERVE. In that
-        case the agent explicitly passes through DECIDE before entering the
-        selected action state.
-        """
+    def execute(self, action: AgentAction) -> None:
         transitions = {
             ActionType.SEARCH: AgentState.SEARCH,
             ActionType.SCROLL: AgentState.SCROLL,
@@ -185,46 +112,53 @@ class Agent:
                 raise InvalidTransitionError(
                     f"Invalid transition for BACK: {self.state.value} -> back"
                 )
-
             self.adapter.back()
+            self.session.record_action(action) if self.session else None
             self.transition(AgentState.OBSERVE)
-            self._create_observation(
-                current_item_id=None,
-                preserve=True,
-            )
+            self._create_observation(current_item_id=None, preserve=True)
             return
 
-        target_state = transitions[action.type]
+        if action.type == ActionType.SEARCH and action.value is None:
+            raise ValueError("SEARCH action requires a query")
+        if action.type == ActionType.OPEN and action.value is None:
+            raise ValueError("OPEN action requires an item ID")
+        if action.type == ActionType.EXPLORE and action.value is None:
+            raise ValueError("EXPLORE action requires a topic")
+
+        if action.type == ActionType.SEARCH:
+            self._ensure_session(action.value)
+        elif action.type == ActionType.STOP:
+            pass
+        elif self.session is None:
+            raise RuntimeError("SessionState must exist before this action")
+
+        if action.type == ActionType.OPEN and self.session.has_seen_item(action.value):
+            raise ValueError(
+                f"OPEN target has already been viewed in this session: {action.value}"
+            )
 
         if self.state == AgentState.OBSERVE:
             self.transition(AgentState.DECIDE)
+        self.transition(transitions[action.type])
 
-        self.transition(target_state)
+        if self.session is not None:
+            self.session.record_action(action)
 
         if action.type == ActionType.SEARCH:
-            if action.value is None:
-                raise ValueError("SEARCH action requires a query")
-
             candidates = self.adapter.search(action.value)
+            self.session.record_search(action.value)
             candidate_ids = [candidate.video_id for candidate in candidates]
-
             self.transition(AgentState.OBSERVE)
             self._create_observation(
                 topic=action.value,
                 candidates=candidate_ids,
-                metadata={
-                    "candidate_count": len(candidates),
-                },
+                metadata={"candidate_count": len(candidates)},
             )
 
         elif action.type == ActionType.OPEN:
-            if action.value is None:
-                raise ValueError("OPEN action requires an item ID")
-
             opened = self.adapter.open(action.value)
-
+            self.session.record_item(action.value)
             self.transition(AgentState.OBSERVE)
-
             metadata = None
             if opened is not None:
                 metadata = {
@@ -241,7 +175,6 @@ class Agent:
                         "metadata": dict(opened.metadata),
                     }
                 }
-
             self._create_observation(
                 current_item_id=action.value,
                 metadata=metadata,
@@ -250,56 +183,33 @@ class Agent:
 
         elif action.type == ActionType.SCROLL:
             self.adapter.scroll()
-
             self.transition(AgentState.OBSERVE)
             self._create_observation(preserve=True)
 
         elif action.type == ActionType.EXPLORE:
-            if action.value is None:
-                raise ValueError("EXPLORE action requires a topic")
-
             candidates = self.adapter.search(action.value)
+            self.session.record_search(action.value)
+            self.session.record_discovered_topic(action.value)
             candidate_ids = [candidate.video_id for candidate in candidates]
-
-            # EXPLORE performs discovery just like SEARCH. The resulting
-            # data is ready for the planner, so the next state is OBSERVE.
             self.transition(AgentState.OBSERVE)
             self._create_observation(
                 topic=action.value,
                 candidates=candidate_ids,
-                metadata={
-                    "candidate_count": len(candidates),
-                    "exploration": True,
-                },
+                metadata={"candidate_count": len(candidates), "exploration": True},
             )
 
         elif action.type == ActionType.WAIT:
             self.adapter.wait()
-
             self.transition(AgentState.OBSERVE)
             self._create_observation(preserve=True)
 
         elif action.type == ActionType.STOP:
             return
 
-    def run(
-        self,
-        planner,
-        initial_action: AgentAction,
-        max_steps: int = 10,
-    ) -> None:
-        """
-        Run a bounded planner-action-observation loop.
-
-        The planner chooses the next action from the latest observation.
-        Execution continues until a terminal state is reached or the
-        maximum number of steps is exhausted.
-        """
+    def run(self, planner, initial_action: AgentAction, max_steps: int = 10) -> None:
         action = initial_action
-
         for _ in range(max_steps):
             self.execute(action)
-
             if self.state in {
                 AgentState.STOPPED,
                 AgentState.SESSION_COMPLETE,
@@ -308,12 +218,13 @@ class Agent:
                 AgentState.RATE_LIMITED,
             }:
                 return
-
             observation = self.get_observation()
-
             if observation is None:
-                raise RuntimeError(
-                    "Agent has no observation after executing an action"
-                )
-
-            action = planner.decide(observation)
+                raise RuntimeError("Agent has no observation after executing an action")
+            if hasattr(planner, "set_session") and self.session is not None:
+                planner.set_session(self.session)
+            try:
+                action = planner.decide(observation)
+            except PlannerError:
+                self.transition(AgentState.ERROR)
+                return

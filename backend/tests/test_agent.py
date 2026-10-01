@@ -7,7 +7,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.agent import Agent, InvalidTransitionError
 from src.agent_action import ActionType, AgentAction
 from src.agent_state import AgentState
-from src.planner import Planner
+from src.planner import Planner, PlannerError
+from src.session_state import SessionState
 from tests.mock_adapter import MockAdapter, make_candidate
 
 
@@ -19,6 +20,17 @@ class ScriptedPlanner:
         if not self.actions:
             return AgentAction(ActionType.STOP)
         return self.actions.pop(0)
+
+
+class FailingPlanner:
+    def decide(self, observation):
+        raise PlannerError("Simulated LLM failure")
+
+
+class NoneReturningAdapter(MockAdapter):
+    def open(self, item_id: str):
+        self.opened.append(item_id)
+        return None
 
 
 class AgentTests(unittest.TestCase):
@@ -39,6 +51,31 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(observation.topic, "JDM")
         self.assertEqual(observation.candidates, ["first", "second"])
         self.assertEqual(observation.metadata["candidate_count"], 2)
+
+    def test_session_records_actions_and_items(self):
+        agent = Agent(self.adapter, SessionState(goal="JDM"))
+
+        agent.execute(AgentAction(ActionType.SEARCH, "JDM"))
+        agent.execute(AgentAction(ActionType.OPEN, "first"))
+        agent.execute(AgentAction(ActionType.EXPLORE, "RB26"))
+
+        self.assertEqual(agent.session.searched_topics, ["JDM", "RB26"])
+        self.assertEqual(agent.session.seen_item_ids, {"first"})
+        self.assertEqual(agent.session.discovered_topics, ["RB26"])
+        self.assertEqual(
+            [action.type for action in agent.session.action_history],
+            [ActionType.SEARCH, ActionType.OPEN, ActionType.EXPLORE],
+        )
+
+    def test_agent_rejects_reopening_seen_item(self):
+        agent = Agent(self.adapter, SessionState(goal="JDM"))
+        agent.execute(AgentAction(ActionType.SEARCH, "JDM"))
+        agent.execute(AgentAction(ActionType.OPEN, "first"))
+
+        with self.assertRaises(ValueError):
+            agent.execute(AgentAction(ActionType.OPEN, "first"))
+
+        self.assertEqual(self.adapter.opened, ["first"])
 
     def test_explore_returns_to_observe_with_results(self):
         agent = Agent(self.adapter)
@@ -86,7 +123,10 @@ class AgentTests(unittest.TestCase):
 
     def test_run_end_to_end_search_open_stop(self):
         agent = Agent(self.adapter)
-        planner = Planner()
+        planner = ScriptedPlanner(
+            AgentAction(ActionType.OPEN, "first"),
+            AgentAction(ActionType.STOP),
+        )
 
         agent.run(
             planner,
@@ -135,6 +175,42 @@ class AgentTests(unittest.TestCase):
         agent = Agent(self.adapter)
         agent.execute(AgentAction(ActionType.SEARCH, "JDM"))
         self.assertEqual(agent.get_state(), AgentState.OBSERVE)
+
+    def test_stop_from_idle_with_no_session(self):
+        agent = Agent(self.adapter)
+        self.assertIsNone(agent.session)
+        self.assertEqual(agent.get_state(), AgentState.IDLE)
+
+        agent.execute(AgentAction(ActionType.STOP))
+
+        self.assertEqual(agent.get_state(), AgentState.STOPPED)
+        self.assertIsNone(agent.session)
+
+    def test_open_returning_none_still_records_item_and_prevents_reopening(self):
+        adapter = NoneReturningAdapter()
+        adapter.add_results("JDM", make_candidate("video-none", "No metadata video"))
+        agent = Agent(adapter, SessionState(goal="JDM"))
+
+        agent.execute(AgentAction(ActionType.SEARCH, "JDM"))
+        agent.execute(AgentAction(ActionType.OPEN, "video-none"))
+
+        self.assertIn("video-none", agent.session.seen_item_ids)
+        self.assertTrue(agent.session.has_seen_item("video-none"))
+
+        with self.assertRaises(ValueError):
+            agent.execute(AgentAction(ActionType.OPEN, "video-none"))
+
+    def test_run_transitions_to_error_on_planner_error(self):
+        agent = Agent(self.adapter)
+        planner = FailingPlanner()
+
+        agent.run(
+            planner,
+            AgentAction(ActionType.SEARCH, "JDM"),
+            max_steps=5,
+        )
+
+        self.assertEqual(agent.get_state(), AgentState.ERROR)
 
 
 if __name__ == "__main__":
