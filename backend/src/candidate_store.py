@@ -1,3 +1,6 @@
+from typing import Any
+
+
 class CandidateStore:
     """
     Session-level store for video candidates.
@@ -6,9 +9,9 @@ class CandidateStore:
     """
 
     def __init__(self):
-        self._candidates = {}
+        self._candidates: dict[str, Any] = {}
 
-    def add(self, candidate) -> bool:
+    def add(self, candidate: Any) -> bool:
         """
         Add a candidate if its video_id has not been seen.
 
@@ -23,9 +26,7 @@ class CandidateStore:
         return True
 
     def add_many(self, candidates) -> int:
-        """
-        Add multiple candidates and return the number of new ones.
-        """
+        """Add multiple candidates and return the number of new ones."""
         added = 0
 
         for candidate in candidates:
@@ -34,7 +35,7 @@ class CandidateStore:
 
         return added
 
-    def get(self, video_id):
+    def get(self, video_id: str):
         """Return a candidate by video ID, or None if unseen."""
         return self._candidates.get(video_id)
 

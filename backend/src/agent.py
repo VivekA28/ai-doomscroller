@@ -38,6 +38,7 @@ class Agent:
             AgentState.OPEN,
             AgentState.EXPLORE,
             AgentState.WAIT,
+            AgentState.OBSERVE,
             AgentState.STOPPED,
             AgentState.SESSION_COMPLETE,
         },
@@ -52,9 +53,10 @@ class Agent:
             AgentState.STOPPED,
         },
         AgentState.EXPLORE: {
-            AgentState.SEARCH,
+            AgentState.OBSERVE,
             AgentState.ERROR,
             AgentState.RATE_LIMITED,
+            AgentState.AUTH_REQUIRED,
             AgentState.STOPPED,
         },
         AgentState.WAIT: {
@@ -88,43 +90,72 @@ class Agent:
 
     def transition(self, new_state: AgentState) -> None:
         """Move to a new state if the transition is valid."""
-
         allowed = self.VALID_TRANSITIONS[self.state]
 
         if new_state not in allowed:
             raise InvalidTransitionError(
-                f"Invalid transition: "
-                f"{self.state.value} -> {new_state.value}"
+                f"Invalid transition: {self.state.value} -> {new_state.value}"
             )
 
         self.state = new_state
 
     def get_state(self) -> AgentState:
         """Return the current agent state."""
-
         return self.state
 
     def get_observation(self) -> Observation | None:
         """Return the most recent observation."""
-
         return self.last_observation
+
+    _UNSET = object()
 
     def _create_observation(
         self,
         *,
-        topic: str | None = None,
-        current_item_id: str | None = None,
-        candidates: list[str] | None = None,
-        metadata: dict | None = None,
+        topic: str | None | object = _UNSET,
+        current_item_id: str | None | object = _UNSET,
+        candidates: list[str] | None | object = _UNSET,
+        metadata: dict | None | object = _UNSET,
+        preserve: bool = False,
     ) -> Observation:
-        """Create and store the current normalized observation."""
+        """
+        Create and store the current normalized observation.
+
+        When preserve=True, fields not supplied by the current action are
+        carried forward from the previous observation. This prevents actions
+        such as OPEN, WAIT, and BACK from silently erasing session context.
+        """
+        previous = self.last_observation
+
+        if preserve and previous is not None:
+            if topic is self._UNSET:
+                topic = previous.topic
+            if current_item_id is self._UNSET:
+                current_item_id = previous.current_item_id
+            if candidates is self._UNSET:
+                candidates = list(previous.candidates)
+            if metadata is self._UNSET:
+                metadata = dict(previous.metadata)
+            elif isinstance(metadata, dict):
+                merged_metadata = dict(previous.metadata)
+                merged_metadata.update(metadata)
+                metadata = merged_metadata
+
+        if topic is self._UNSET:
+            topic = None
+        if current_item_id is self._UNSET:
+            current_item_id = None
+        if candidates is self._UNSET:
+            candidates = []
+        if metadata is self._UNSET:
+            metadata = {}
 
         observation = Observation(
             state=self.state.value,
             topic=topic,
             current_item_id=current_item_id,
-            candidates=candidates or [],
-            metadata=metadata or {},
+            candidates=candidates,
+            metadata=metadata,
         )
 
         self.last_observation = observation
@@ -134,11 +165,10 @@ class Agent:
         """
         Execute one high-level agent action.
 
-        Planner-selected actions normally originate from OBSERVE.
-        In that case the agent explicitly passes through DECIDE before
-        entering the selected action state.
+        Planner-selected actions normally originate from OBSERVE. In that
+        case the agent explicitly passes through DECIDE before entering the
+        selected action state.
         """
-
         transitions = {
             ActionType.SEARCH: AgentState.SEARCH,
             ActionType.SCROLL: AgentState.SCROLL,
@@ -149,7 +179,19 @@ class Agent:
         }
 
         if action.type == ActionType.BACK:
+            if self.state == AgentState.OBSERVE:
+                self.transition(AgentState.DECIDE)
+            elif self.state != AgentState.DECIDE:
+                raise InvalidTransitionError(
+                    f"Invalid transition for BACK: {self.state.value} -> back"
+                )
+
             self.adapter.back()
+            self.transition(AgentState.OBSERVE)
+            self._create_observation(
+                current_item_id=None,
+                preserve=True,
+            )
             return
 
         target_state = transitions[action.type]
@@ -164,13 +206,9 @@ class Agent:
                 raise ValueError("SEARCH action requires a query")
 
             candidates = self.adapter.search(action.value)
-            candidate_ids = [
-                candidate.video_id
-                for candidate in candidates
-            ]
+            candidate_ids = [candidate.video_id for candidate in candidates]
 
             self.transition(AgentState.OBSERVE)
-
             self._create_observation(
                 topic=action.value,
                 candidates=candidate_ids,
@@ -183,38 +221,55 @@ class Agent:
             if action.value is None:
                 raise ValueError("OPEN action requires an item ID")
 
-            self.adapter.open(action.value)
+            opened = self.adapter.open(action.value)
 
             self.transition(AgentState.OBSERVE)
 
+            metadata = None
+            if opened is not None:
+                metadata = {
+                    "item": {
+                        "video_id": opened.video_id,
+                        "title": opened.title,
+                        "channel": opened.channel,
+                        "duration_seconds": opened.duration_seconds,
+                        "signals": {
+                            "duration_score": opened.signals.duration_score,
+                            "text_score": opened.signals.text_score,
+                            "visual_score": opened.signals.visual_score,
+                        },
+                        "metadata": dict(opened.metadata),
+                    }
+                }
+
             self._create_observation(
                 current_item_id=action.value,
+                metadata=metadata,
+                preserve=True,
             )
 
         elif action.type == ActionType.SCROLL:
             self.adapter.scroll()
 
             self.transition(AgentState.OBSERVE)
-
-            self._create_observation()
+            self._create_observation(preserve=True)
 
         elif action.type == ActionType.EXPLORE:
             if action.value is None:
                 raise ValueError("EXPLORE action requires a topic")
 
             candidates = self.adapter.search(action.value)
-            candidate_ids = [
-                candidate.video_id
-                for candidate in candidates
-            ]
+            candidate_ids = [candidate.video_id for candidate in candidates]
 
-            self.transition(AgentState.SEARCH)
-
+            # EXPLORE performs discovery just like SEARCH. The resulting
+            # data is ready for the planner, so the next state is OBSERVE.
+            self.transition(AgentState.OBSERVE)
             self._create_observation(
                 topic=action.value,
                 candidates=candidate_ids,
                 metadata={
                     "candidate_count": len(candidates),
+                    "exploration": True,
                 },
             )
 
@@ -222,8 +277,7 @@ class Agent:
             self.adapter.wait()
 
             self.transition(AgentState.OBSERVE)
-
-            self._create_observation()
+            self._create_observation(preserve=True)
 
         elif action.type == ActionType.STOP:
             return
@@ -241,7 +295,6 @@ class Agent:
         Execution continues until a terminal state is reached or the
         maximum number of steps is exhausted.
         """
-
         action = initial_action
 
         for _ in range(max_steps):

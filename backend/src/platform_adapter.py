@@ -1,4 +1,7 @@
 from abc import ABC, abstractmethod
+from typing import Any
+
+from src.models import VideoCandidate
 
 
 class PlatformAdapter(ABC):
@@ -10,8 +13,8 @@ class PlatformAdapter(ABC):
     """
 
     @abstractmethod
-    def search(self, query: str) -> None:
-        """Search for content."""
+    def search(self, query: str) -> list[VideoCandidate]:
+        """Search for content and return discovered candidates."""
         raise NotImplementedError
 
     @abstractmethod
@@ -20,8 +23,12 @@ class PlatformAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def open(self, item_id: str) -> None:
-        """Open a content item."""
+    def open(self, item_id: str) -> VideoCandidate | None:
+        """
+        Open a content item and return available normalized item data.
+
+        A platform may return None when opening does not provide metadata.
+        """
         raise NotImplementedError
 
     @abstractmethod

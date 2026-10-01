@@ -11,26 +11,20 @@ class Planner:
     """
 
     def decide(self, observation: Observation) -> AgentAction:
-        """
-        Choose the next action from the current observation.
-        """
+        """Choose the next action from the current observation."""
+        if observation.state != "observe":
+            return AgentAction(type=ActionType.STOP)
 
-        if observation.state == "observe":
-            if observation.candidates:
-                return AgentAction(
-                    type=ActionType.OPEN,
-                    value=observation.candidates[0],
-                )
+        # For the deterministic smoke test, open one candidate and then stop.
+        # A future planner can use the preserved candidate list/current item
+        # plus richer metadata to continue exploration.
+        if observation.current_item_id is not None:
+            return AgentAction(type=ActionType.STOP)
 
+        if observation.candidates:
             return AgentAction(
-                type=ActionType.STOP,
+                type=ActionType.OPEN,
+                value=observation.candidates[0],
             )
 
-        if observation.state == "search":
-            return AgentAction(
-                type=ActionType.WAIT,
-            )
-
-        return AgentAction(
-            type=ActionType.STOP,
-        )
+        return AgentAction(type=ActionType.STOP)

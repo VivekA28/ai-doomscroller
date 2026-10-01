@@ -1,4 +1,5 @@
 from src.candidate_pipeline import CandidatePipeline
+from src.models import VideoCandidate
 from src.platform_adapter import PlatformAdapter
 
 
@@ -17,7 +18,7 @@ class YouTubeAdapter(PlatformAdapter):
     def __init__(self, pipeline: CandidatePipeline):
         self.pipeline = pipeline
 
-    def search(self, query: str) -> list:
+    def search(self, query: str) -> list[VideoCandidate]:
         """Search YouTube and return newly discovered candidates."""
         return self.pipeline.search(query)
 
@@ -26,16 +27,22 @@ class YouTubeAdapter(PlatformAdapter):
             "YouTube API does not provide feed/Shorts scrolling."
         )
 
-    def open(self, item_id: str) -> None:
+    def open(self, item_id: str) -> VideoCandidate:
         """
-        Retrieve metadata for a known video.
+        Open a candidate already discovered by the pipeline.
 
-        Actual content viewing will be implemented separately.
+        The candidate store is authoritative for items already discovered
+        during this session, so opening an item does not make another
+        videos.list API request.
         """
-        details = self.pipeline.youtube.get_videos([item_id])
+        candidate = self.pipeline.store.get(item_id)
 
-        if not details.get("items"):
-            raise ValueError(f"YouTube video not found: {item_id}")
+        if candidate is None:
+            raise ValueError(
+                f"YouTube video is not in the candidate store: {item_id}"
+            )
+
+        return candidate
 
     def back(self) -> None:
         raise UnsupportedOperationError(

@@ -14,12 +14,5 @@ class ActionType(str, Enum):
 
 @dataclass
 class AgentAction:
-    """
-    A validated high-level action chosen by the decision system.
-
-    The action describes WHAT the agent wants to do.
-    Platform adapters will later decide HOW to execute it.
-    """
-
     type: ActionType
     value: str | None = None

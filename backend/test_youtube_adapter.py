@@ -3,18 +3,23 @@ from src.youtube_adapter import YouTubeAdapter, UnsupportedOperationError
 from src.youtube_client import YouTubeClient
 
 
-pipeline = CandidatePipeline(YouTubeClient())
-adapter = YouTubeAdapter(pipeline)
+def main():
+    pipeline = CandidatePipeline(YouTubeClient())
+    adapter = YouTubeAdapter(pipeline)
 
-adapter.search("JDM")
+    adapter.search("JDM")
 
-print("Search worked")
-print("Candidates:", len(pipeline.all_candidates()))
+    print("Search worked")
+    print("Candidates:", len(pipeline.all_candidates()))
 
-adapter.wait()
-print("Wait worked")
+    adapter.wait()
+    print("Wait worked")
 
-try:
-    adapter.scroll()
-except UnsupportedOperationError as e:
-    print("Scroll correctly rejected:", e)
+    try:
+        adapter.scroll()
+    except UnsupportedOperationError as e:
+        print("Scroll correctly rejected:", e)
+
+
+if __name__ == "__main__":
+    main()
