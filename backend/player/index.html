@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <title>Doomscroller — Local Player</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #101114; color: #f3f4f6; }
+    body { max-width: 1040px; margin: 0 auto; padding: 24px; }
+    h1 { margin: 0 0 8px; font-size: clamp(1.5rem, 4vw, 2.1rem); }
+    p { color: #b9bdc7; line-height: 1.45; }
+    .panel { background: #191b21; border: 1px solid #343741; border-radius: 14px; padding: 16px; margin: 16px 0; }
+    .player-wrap { width: 100%; max-width: 800px; min-width: 200px; margin: 0 auto; }
+    #player { width: 100%; aspect-ratio: 16 / 9; min-height: 200px; }
+    .controls, form { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    input { flex: 1; min-width: 230px; background: #0e0f12; color: #fff; border: 1px solid #464a56; border-radius: 8px; padding: 11px 12px; }
+    button { background: #e5e7eb; color: #111827; border: 0; border-radius: 8px; padding: 11px 14px; font-weight: 650; cursor: pointer; }
+    button.secondary { background: #2a2d35; color: #f3f4f6; border: 1px solid #464a56; }
+    button:focus-visible, input:focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; }
+    #status { font-weight: 650; }
+    #details { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9rem; }
+    .notice { font-size: .92rem; }
+    .dot { display: inline-block; height: 9px; width: 9px; border-radius: 100%; background: #737783; margin-right: 7px; }
+    .dot.online { background: #86efac; }
+  </style>
+</head>
+<body>
+  <h1>Doomscroller · Local YouTube Player</h1>
+  <p>Real YouTube playback surface for local development. Agent commands will appear here; this page does not imitate YouTube's native Shorts feed.</p>
+
+  <section class="panel player-wrap" aria-label="YouTube video player">
+    <div id="player"></div>
+    <p id="player-message" role="status" aria-live="polite">Loading the official YouTube player…</p>
+  </section>
+
+  <section class="panel">
+    <h2>Playback controls</h2>
+    <div class="controls">
+      <button id="enable-playback" type="button">Enable playback for this session</button>
+      <button id="pause" class="secondary" type="button">Pause</button>
+      <button id="resume" class="secondary" type="button">Play</button>
+      <button id="stop" class="secondary" type="button">Stop</button>
+    </div>
+    <p class="notice">The player is kept fully visible with its standard controls. Entering an ID cues the video first. Click Enable playback if you'd like agent-loaded videos to attempt playback; browser autoplay rules may still require using the player’s Play control.</p>
+  </section>
+
+  <section class="panel">
+    <h2>Manual bridge check</h2>
+    <p>Optional smoke test: enter an 11-character YouTube video ID. This is only a player-interface test and does not bypass candidate validation in the agent.</p>
+    <form id="manual-form">
+      <input id="video-id" name="video-id" maxlength="11" pattern="[A-Za-z0-9_-]{11}" placeholder="YouTube video ID (11 characters)" autocomplete="off" required>
+      <button type="submit">Cue video</button>
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2>Live status</h2>
+    <p><span id="connection-dot" class="dot"></span><span id="connection">Waiting for player events</span></p>
+    <p id="status">Player state: not ready</p>
+    <p id="details">No video loaded</p>
+  </section>
+
+  <script>
+    // This page communicates only with the loopback Python bridge serving it.
+    const el = (id) => document.getElementById(id);
+    const PLAYER_STATES = { '-1': 'unstarted', '0': 'ended', '1': 'playing', '2': 'paused', '3': 'buffering', '5': 'cued' };
+    let player = null;
+    let playerReady = false;
+    let polling = false;
+    let playbackEnabled = false;
+    let currentVideoId = null;
+    let pendingCommandId = null;
+
+    async function postEvent(payload) {
+      try {
+        await fetch('/api/events', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload), cache: 'no-store'
+        });
+      } catch (error) {
+        el('connection').textContent = 'Bridge connection lost';
+        el('connection-dot').classList.remove('online');
+      }
+    }
+
+    function stateName(state) { return PLAYER_STATES[String(state)] || `state ${state}`; }
+
+    function updateState(state, message) {
+      el('status').textContent = `Player state: ${stateName(state)}`;
+      el('details').textContent = currentVideoId ? `Video ID: ${currentVideoId}` : 'No video loaded';
+      if (message) el('player-message').textContent = message;
+      el('connection').textContent = 'Connected · receiving player events';
+      el('connection-dot').classList.add('online');
+    }
+
+    function reportPlayerState(state) {
+      updateState(state);
+      let currentTime = 0;
+      try { currentTime = player && player.getCurrentTime ? player.getCurrentTime() : 0; } catch (_) {}
+      postEvent({
+        type: 'player_state', video_id: currentVideoId,
+        player_state: stateName(state), current_time: currentTime
+      });
+      if (pendingCommandId && (state === 5 || state === 1)) {
+        const commandId = pendingCommandId;
+        pendingCommandId = null;
+        postEvent({
+          type: 'command_result', command_id: commandId, success: true,
+          video_id: currentVideoId, player_state: stateName(state),
+          message: state === 1 ? 'Video is playing' : 'Video loaded and cued; playback may require a click'
+        });
+      }
+    }
+
+    function onPlayerReady() {
+      playerReady = true;
+      updateState(-1, 'Player ready. Cue a video or wait for an agent command.');
+      pollCommands();
+    }
+
+    function onPlayerStateChange(event) { reportPlayerState(event.data); }
+
+    function onPlayerError(event) {
+      const message = `YouTube player error ${event.data}; the video may be unavailable or embedding may be disabled.`;
+      el('player-message').textContent = message;
+      if (pendingCommandId) {
+        postEvent({
+          type: 'command_result', command_id: pendingCommandId, success: false,
+          video_id: currentVideoId, player_state: 'error', message
+        });
+        pendingCommandId = null;
+      }
+      postEvent({ type: 'player_state', video_id: currentVideoId, player_state: 'error', message });
+    }
+
+    window.onYouTubeIframeAPIReady = function () {
+      player = new YT.Player('player', {
+        width: '100%', height: '450',
+        playerVars: { controls: 1, autoplay: 0, enablejsapi: 1, origin: window.location.origin, rel: 0 },
+        events: { onReady: onPlayerReady, onStateChange: onPlayerStateChange, onError: onPlayerError }
+      });
+    };
+
+    async function executeCommand(command) {
+      if (!command || !command.command_id) return;
+      if (command.operation === 'open') {
+        currentVideoId = command.video_id;
+        pendingCommandId = command.command_id;
+        el('player-message').textContent = `Loading video ${currentVideoId}…`;
+        try {
+          if (playbackEnabled) player.loadVideoById(currentVideoId);
+          else player.cueVideoById(currentVideoId);
+        } catch (error) {
+          postEvent({ type: 'command_result', command_id: pendingCommandId, success: false, message: String(error), video_id: currentVideoId, player_state: 'error' });
+          pendingCommandId = null;
+        }
+        return;
+      }
+      if (command.operation === 'stop') {
+        player.stopVideo();
+        postEvent({ type: 'command_result', command_id: command.command_id, success: true, message: 'Player stop requested', video_id: currentVideoId, player_state: 'stopped' });
+        return;
+      }
+      postEvent({ type: 'command_result', command_id: command.command_id, success: false, message: `Unsupported player operation: ${command.operation}`, video_id: currentVideoId, player_state: 'error' });
+    }
+
+    async function pollCommands() {
+      if (polling) return;
+      polling = true;
+      while (playerReady) {
+        try {
+          const response = await fetch('/api/next-command', { cache: 'no-store' });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const body = await response.json();
+          if (body.command) await executeCommand(body.command);
+        } catch (error) {
+          el('connection').textContent = 'Bridge poll failed; retrying…';
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+      polling = false;
+    }
+
+    el('manual-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const videoId = el('video-id').value.trim();
+      if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) {
+        el('player-message').textContent = 'Enter a valid 11-character YouTube video ID.';
+        return;
+      }
+      try {
+        const response = await fetch('/api/manual-open', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ video_id: videoId })
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+        el('player-message').textContent = `Queued video ${videoId}…`;
+      } catch (error) {
+        el('player-message').textContent = `Could not queue video: ${error.message}`;
+      }
+    });
+
+    el('enable-playback').addEventListener('click', () => {
+      playbackEnabled = true;
+      el('enable-playback').textContent = 'Playback enabled for this session';
+      el('player-message').textContent = 'Playback enabled. Browser policy may still require a Play click in the player.';
+      try {
+        if (player && player.getPlayerState && player.getPlayerState() === YT.PlayerState.CUED) player.playVideo();
+      } catch (_) {}
+    });
+    el('pause').addEventListener('click', () => { if (playerReady) player.pauseVideo(); });
+    el('resume').addEventListener('click', () => { if (playerReady) player.playVideo(); });
+    el('stop').addEventListener('click', () => { if (playerReady) player.stopVideo(); });
+
+    fetch('/api/status', { cache: 'no-store' }).catch(() => {});
+    const apiScript = document.createElement('script');
+    apiScript.src = 'https://www.youtube.com/iframe_api';
+    document.head.appendChild(apiScript);
+  </script>
+</body>
+</html>
