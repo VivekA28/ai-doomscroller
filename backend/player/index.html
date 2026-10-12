@@ -69,7 +69,10 @@
     let playerReady = false;
     let polling = false;
     let playbackEnabled = false;
-    let currentVideoId = null;
+    // Start with the official IFrame API sample so the player is initialized
+    // with a valid video instead of an empty player (which can raise error 2).
+    const DEFAULT_VIDEO_ID = 'M7lc1UVf-VE';
+    let currentVideoId = DEFAULT_VIDEO_ID;
     let pendingCommandId = null;
 
     async function postEvent(payload) {
@@ -115,14 +118,24 @@
 
     function onPlayerReady() {
       playerReady = true;
-      updateState(-1, 'Player ready. Cue a video or wait for an agent command.');
+      updateState(-1, `Player ready. Test video ${DEFAULT_VIDEO_ID} is loaded; cue another video below.`);
       pollCommands();
     }
 
     function onPlayerStateChange(event) { reportPlayerState(event.data); }
 
+    const PLAYER_ERROR_MESSAGES = {
+      2: 'Invalid player parameter or video ID.',
+      5: 'The requested content could not be played by the HTML5 player.',
+      100: 'The video was not found, was removed, or is private.',
+      101: 'The video owner does not allow playback in embedded players.',
+      150: 'The video owner does not allow playback in embedded players.',
+      153: 'YouTube did not receive a Referer header or equivalent client identification.'
+    };
+
     function onPlayerError(event) {
-      const message = `YouTube player error ${event.data}; the video may be unavailable or embedding may be disabled.`;
+      const detail = PLAYER_ERROR_MESSAGES[event.data] || 'Unknown YouTube player error.';
+      const message = `YouTube player error ${event.data}: ${detail}`;
       el('player-message').textContent = message;
       if (pendingCommandId) {
         postEvent({
@@ -137,6 +150,7 @@
     window.onYouTubeIframeAPIReady = function () {
       player = new YT.Player('player', {
         width: '100%', height: '450',
+        videoId: DEFAULT_VIDEO_ID,
         playerVars: { controls: 1, autoplay: 0, enablejsapi: 1, origin: window.location.origin, rel: 0 },
         events: { onReady: onPlayerReady, onStateChange: onPlayerStateChange, onError: onPlayerError }
       });
