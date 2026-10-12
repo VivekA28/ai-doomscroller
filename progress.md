@@ -1157,3 +1157,62 @@ The later platform/content layer can add stronger signals where available.
 or LLM-controlled arbitrary browser commands. The LLM/decision layer now
 exists behind structured action validation, but platform execution must still
 remain behind the deterministic adapter/tool boundary.
+
+------------------------------------------------------------------------
+
+# 21. Execution Boundary Implementation (Branch: `feat/execution-boundary`)
+
+This section records the implementation work started after the previous
+checkpoint. The existing `main` branch is unchanged.
+
+## Added
+
+- `backend/src/executor.py`
+  - `ActionExecutor` validates known `AgentAction` values before execution.
+  - Returns a structured `ExecutionResult` for success or handled failure.
+  - Normalizes unsupported operations, local quota exhaustion, YouTube API
+    authentication failures, rate-limit failures, and generic API errors.
+  - Supports an event sink for concise activity/status events that can later
+    be consumed by a UI.
+  - Does not execute arbitrary LLM-generated commands.
+- `Agent.run()` uses the deterministic executor by default. An executor may
+  be injected when an event sink or custom execution wrapper is needed.
+- `PlatformAdapter` now owns the shared `UnsupportedOperationError` so the
+  error type is not defined only inside the YouTube adapter.
+- `YouTubeClient` distinguishes authentication failures and recognized quota
+  or rate-limit responses from generic API errors using structured API error
+  reasons.
+- Agent state-transition rules now allow expected action failures to transition
+  into error, authentication-required, or rate-limited states. Search from the
+  decision state is also an explicitly allowed transition.
+
+## Tests and CI
+
+- Added `backend/tests/test_executor.py` for action validation, structured
+  results/events, unsupported operations, quota exhaustion, authentication
+  failures, and the integrated bounded agent loop.
+- Added `backend/tests/test_youtube_client_errors.py` for typed API-error
+  classification.
+- Added `.github/workflows/backend-tests.yml` to run offline unit tests under
+  Python 3.12.
+
+## Validation status
+
+GitHub Actions verified the offline backend suite: **46 tests passed** (Python
+3.12; no live API keys required). The successful run is recorded here:
+https://github.com/VivekA28/ai-doomscroller/actions/runs/38297982165
+
+Run locally from the backend directory:
+
+```bash
+python3 -m unittest discover -s . -p 'test_*.py' -v
+```
+
+## Important limitation remains
+
+This work makes execution outcomes deterministic and observable; it does not
+implement live YouTube browser navigation. The current YouTube Data API adapter
+still intentionally rejects `SCROLL` and browser-style `BACK`. Candidate
+metadata lookup through `OPEN` is not equivalent to opening a real viewing
+page or playing a video. Live UI navigation must remain a separate authorized
+adapter capability and needs its own tests.

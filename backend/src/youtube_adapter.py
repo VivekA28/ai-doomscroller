@@ -1,10 +1,6 @@
 from src.candidate_pipeline import CandidatePipeline
 from src.models import VideoCandidate
-from src.platform_adapter import PlatformAdapter
-
-
-class UnsupportedOperationError(Exception):
-    """Raised when the current YouTube integration cannot perform an operation."""
+from src.platform_adapter import PlatformAdapter, UnsupportedOperationError
 
 
 class YouTubeAdapter(PlatformAdapter):
@@ -24,29 +20,26 @@ class YouTubeAdapter(PlatformAdapter):
 
     def scroll(self) -> None:
         raise UnsupportedOperationError(
-            "YouTube API does not provide feed/Shorts scrolling."
+            "YouTube Data API does not provide feed/Shorts scrolling."
         )
 
     def open(self, item_id: str) -> VideoCandidate:
         """
-        Open a candidate already discovered by the pipeline.
+        Return a candidate already discovered by the pipeline.
 
-        The candidate store is authoritative for items already discovered
-        during this session, so opening an item does not make another
-        videos.list API request.
+        This operation exposes candidate metadata; it does not open a live
+        browser page or start playback.
         """
         candidate = self.pipeline.store.get(item_id)
-
         if candidate is None:
             raise ValueError(
                 f"YouTube video is not in the candidate store: {item_id}"
             )
-
         return candidate
 
     def back(self) -> None:
         raise UnsupportedOperationError(
-            "YouTube API does not provide browser-style back navigation."
+            "YouTube Data API does not provide browser-style back navigation."
         )
 
     def wait(self) -> None:

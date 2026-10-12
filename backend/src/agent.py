@@ -1,5 +1,6 @@
 from src.agent_action import ActionType, AgentAction
 from src.agent_state import AgentState
+from src.executor import ActionExecutor
 from src.observation import Observation
 from src.platform_adapter import PlatformAdapter
 from src.planner import PlannerError
@@ -15,13 +16,35 @@ class Agent:
 
     VALID_TRANSITIONS = {
         AgentState.IDLE: {AgentState.SEARCH, AgentState.STOPPED},
-        AgentState.SEARCH: {AgentState.OBSERVE, AgentState.ERROR, AgentState.RATE_LIMITED, AgentState.AUTH_REQUIRED, AgentState.STOPPED},
-        AgentState.OBSERVE: {AgentState.DECIDE, AgentState.ERROR, AgentState.STOPPED},
-        AgentState.DECIDE: {AgentState.SCROLL, AgentState.OPEN, AgentState.EXPLORE, AgentState.WAIT, AgentState.OBSERVE, AgentState.STOPPED, AgentState.SESSION_COMPLETE},
-        AgentState.SCROLL: {AgentState.OBSERVE, AgentState.ERROR, AgentState.STOPPED},
-        AgentState.OPEN: {AgentState.OBSERVE, AgentState.ERROR, AgentState.STOPPED},
-        AgentState.EXPLORE: {AgentState.OBSERVE, AgentState.ERROR, AgentState.RATE_LIMITED, AgentState.AUTH_REQUIRED, AgentState.STOPPED},
-        AgentState.WAIT: {AgentState.OBSERVE, AgentState.STOPPED},
+        AgentState.SEARCH: {
+            AgentState.OBSERVE, AgentState.ERROR, AgentState.RATE_LIMITED,
+            AgentState.AUTH_REQUIRED, AgentState.STOPPED,
+        },
+        AgentState.OBSERVE: {
+            AgentState.DECIDE, AgentState.ERROR, AgentState.STOPPED,
+        },
+        AgentState.DECIDE: {
+            AgentState.SEARCH, AgentState.SCROLL, AgentState.OPEN,
+            AgentState.EXPLORE, AgentState.WAIT, AgentState.OBSERVE,
+            AgentState.ERROR, AgentState.AUTH_REQUIRED, AgentState.RATE_LIMITED,
+            AgentState.STOPPED, AgentState.SESSION_COMPLETE,
+        },
+        AgentState.SCROLL: {
+            AgentState.OBSERVE, AgentState.ERROR, AgentState.AUTH_REQUIRED,
+            AgentState.RATE_LIMITED, AgentState.STOPPED,
+        },
+        AgentState.OPEN: {
+            AgentState.OBSERVE, AgentState.ERROR, AgentState.AUTH_REQUIRED,
+            AgentState.RATE_LIMITED, AgentState.STOPPED,
+        },
+        AgentState.EXPLORE: {
+            AgentState.OBSERVE, AgentState.ERROR, AgentState.RATE_LIMITED,
+            AgentState.AUTH_REQUIRED, AgentState.STOPPED,
+        },
+        AgentState.WAIT: {
+            AgentState.OBSERVE, AgentState.ERROR, AgentState.AUTH_REQUIRED,
+            AgentState.RATE_LIMITED, AgentState.STOPPED,
+        },
         AgentState.PAUSED: {AgentState.OBSERVE, AgentState.STOPPED},
         AgentState.ERROR: {AgentState.IDLE, AgentState.STOPPED},
         AgentState.AUTH_REQUIRED: {AgentState.IDLE, AgentState.STOPPED},
@@ -52,11 +75,15 @@ class Agent:
 
     _UNSET = object()
 
-    def _create_observation(self, *, topic: str | None | object = _UNSET,
-                            current_item_id: str | None | object = _UNSET,
-                            candidates: list[str] | None | object = _UNSET,
-                            metadata: dict | None | object = _UNSET,
-                            preserve: bool = False) -> Observation:
+    def _create_observation(
+        self,
+        *,
+        topic: str | None | object = _UNSET,
+        current_item_id: str | None | object = _UNSET,
+        candidates: list[str] | None | object = _UNSET,
+        metadata: dict | None | object = _UNSET,
+        preserve: bool = False,
+    ) -> Observation:
         previous = self.last_observation
         if preserve and previous is not None:
             if topic is self._UNSET:
@@ -113,7 +140,8 @@ class Agent:
                     f"Invalid transition for BACK: {self.state.value} -> back"
                 )
             self.adapter.back()
-            self.session.record_action(action) if self.session else None
+            if self.session is not None:
+                self.session.record_action(action)
             self.transition(AgentState.OBSERVE)
             self._create_observation(current_item_id=None, preserve=True)
             return
@@ -127,9 +155,7 @@ class Agent:
 
         if action.type == ActionType.SEARCH:
             self._ensure_session(action.value)
-        elif action.type == ActionType.STOP:
-            pass
-        elif self.session is None:
+        elif action.type != ActionType.STOP and self.session is None:
             raise RuntimeError("SessionState must exist before this action")
 
         if action.type == ActionType.OPEN and self.session.has_seen_item(action.value):
@@ -206,10 +232,26 @@ class Agent:
         elif action.type == ActionType.STOP:
             return
 
-    def run(self, planner, initial_action: AgentAction, max_steps: int = 10) -> None:
+    def run(
+        self,
+        planner,
+        initial_action: AgentAction,
+        max_steps: int = 10,
+        *,
+        executor: ActionExecutor | None = None,
+    ) -> None:
+        """
+        Run a bounded planner/action loop through the deterministic executor.
+
+        Tests can inject an executor/event sink; production runs use the same
+        validated boundary by default.
+        """
+        executor = executor or ActionExecutor(self)
         action = initial_action
         for _ in range(max_steps):
-            self.execute(action)
+            outcome = executor.execute(action)
+            if not outcome.success:
+                return
             if self.state in {
                 AgentState.STOPPED,
                 AgentState.SESSION_COMPLETE,

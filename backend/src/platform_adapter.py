@@ -1,7 +1,10 @@
 from abc import ABC, abstractmethod
-from typing import Any
 
 from src.models import VideoCandidate
+
+
+class UnsupportedOperationError(RuntimeError):
+    """Raised when an adapter cannot perform a requested operation."""
 
 
 class PlatformAdapter(ABC):
