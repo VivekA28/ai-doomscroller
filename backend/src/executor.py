@@ -7,11 +7,13 @@ from typing import Any, Callable
 from src.agent_action import ActionType, AgentAction
 from src.agent_state import AgentState
 from src.observation import Observation
-from src.platform_adapter import PlatformAdapter
+from src.platform_adapter import UnsupportedOperationError
 from src.quota import QuotaExceededError
-from src.session_state import SessionState
-from src.youtube_adapter import UnsupportedOperationError
-from src.youtube_client import YouTubeAPIError
+from src.youtube_client import (
+    YouTubeAPIError,
+    YouTubeAuthenticationError,
+    YouTubeRateLimitError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +27,7 @@ class UnsupportedActionError(ExecutionError):
 
 
 class AuthenticationRequiredError(ExecutionError):
-    """Raised when execution requires the user to authenticate."""
+    """Raised when execution requires the user to authenticate/configure access."""
 
 
 class RateLimitedError(ExecutionError):
@@ -48,7 +50,8 @@ class ActionExecutor:
     """
     Deterministic boundary between planner output, Agent, and platform adapter.
 
-    This component maps known structured actions to Agent.execute; it never
+    This component maps validated structured actions to Agent.execute, normalizes
+    expected platform failures, and emits concise status events. It never
     evaluates or executes arbitrary model-generated code or browser commands.
     """
 
@@ -64,7 +67,6 @@ class ActionExecutor:
     def execute(self, action: AgentAction) -> ExecutionResult:
         if not isinstance(action, AgentAction):
             raise TypeError("action must be an AgentAction")
-
         if not isinstance(action.type, ActionType):
             raise ValueError("action.type must be a known ActionType")
 
@@ -76,18 +78,17 @@ class ActionExecutor:
             return self._failure(action, UnsupportedActionError(str(exc)))
         except QuotaExceededError as exc:
             return self._failure(action, RateLimitedError(str(exc)))
+        except YouTubeAuthenticationError as exc:
+            return self._failure(action, AuthenticationRequiredError(str(exc)))
+        except YouTubeRateLimitError as exc:
+            return self._failure(action, RateLimitedError(str(exc)))
         except YouTubeAPIError as exc:
-            category = self._classify_api_error(exc)
-            if category == "auth":
-                return self._failure(action, AuthenticationRequiredError(str(exc)))
-            if category == "rate_limit":
-                return self._failure(action, RateLimitedError(str(exc)))
             return self._failure(action, ExecutionError(str(exc)))
         except (TimeoutError, ConnectionError) as exc:
             return self._failure(action, ExecutionError(str(exc)))
         except Exception as exc:
-            # Deterministic boundary: report failure; don't allow failed actions
-            # to be recorded as successful or escape into an uncontrolled loop.
+            # Keep failures at the execution boundary: a failed action must not
+            # be reported as successful or escape into an uncontrolled loop.
             logger.exception("Action execution failed: %s", action.type.value)
             return self._failure(action, ExecutionError(str(exc)))
 
@@ -110,20 +111,17 @@ class ActionExecutor:
         if action.type in requires_value and (
             not isinstance(action.value, str) or not action.value.strip()
         ):
-            raise ValueError(f"{action.type.value.upper()} requires a non-empty value")
+            raise ValueError(
+                f"{action.type.value.upper()} requires a non-empty value"
+            )
         if action.type in forbids_value and action.value is not None:
-            raise ValueError(f"{action.type.value.upper()} must have value=None")
+            raise ValueError(
+                f"{action.type.value.upper()} must have value=None"
+            )
 
-    @staticmethod
-    def _classify_api_error(exc: YouTubeAPIError) -> str:
-        text = str(exc).casefold()
-        if "401" in text or "forbidden" in text or "keyinvalid" in text:
-            return "auth"
-        if "quotaexceeded" in text or "ratelimitexceeded" in text or "429" in text:
-            return "rate_limit"
-        return "other"
-
-    def _failure(self, action: AgentAction, error: ExecutionError) -> ExecutionResult:
+    def _failure(
+        self, action: AgentAction, error: ExecutionError
+    ) -> ExecutionResult:
         if isinstance(error, AuthenticationRequiredError):
             target = AgentState.AUTH_REQUIRED
         elif isinstance(error, RateLimitedError):
@@ -131,12 +129,19 @@ class ActionExecutor:
         else:
             target = AgentState.ERROR
 
-        # Execution failures may happen after Agent has entered an action state.
+        # The state machine remains authoritative. Never mutate state directly
+        # to make an error appear valid; transition rules must allow the move.
         current = self.agent.get_state()
-        if target in self.agent.VALID_TRANSITIONS.get(current, set()):
+        allowed = self.agent.VALID_TRANSITIONS.get(current, set())
+        if target in allowed:
             self.agent.transition(target)
-        elif current not in {AgentState.STOPPED, AgentState.SESSION_COMPLETE}:
-            self.agent.state = target
+        elif AgentState.ERROR in allowed:
+            self.agent.transition(AgentState.ERROR)
+        else:
+            logger.error(
+                "Cannot transition agent from %s after execution failure",
+                current.value,
+            )
 
         result = ExecutionResult(
             action=action,
@@ -146,17 +151,24 @@ class ActionExecutor:
             message=str(error),
             error_type=type(error).__name__,
         )
-        logger.warning("Action %s failed (%s): %s", action.type.value, result.error_type, error)
+        logger.warning(
+            "Action %s failed (%s): %s",
+            action.type.value,
+            result.error_type,
+            error,
+        )
         self._emit(result)
         return result
 
     def _emit(self, result: ExecutionResult) -> None:
         if self.event_sink is not None:
-            self.event_sink({
-                "action": result.action.type.value,
-                "value": result.action.value,
-                "success": result.success,
-                "state": result.state.value,
-                "message": result.message,
-                "error_type": result.error_type,
-            })
+            self.event_sink(
+                {
+                    "action": result.action.type.value,
+                    "value": result.action.value,
+                    "success": result.success,
+                    "state": result.state.value,
+                    "message": result.message,
+                    "error_type": result.error_type,
+                }
+            )
