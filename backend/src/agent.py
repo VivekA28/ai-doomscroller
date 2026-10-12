@@ -122,6 +122,22 @@ class Agent:
         if self.session is None:
             self.session = SessionState(goal=goal)
 
+    @staticmethod
+    def _candidate_metadata(candidate) -> dict:
+        """Convert a normalized candidate to the planner/UI-safe item payload."""
+        return {
+            "video_id": candidate.video_id,
+            "title": candidate.title,
+            "channel": candidate.channel,
+            "duration_seconds": candidate.duration_seconds,
+            "signals": {
+                "duration_score": candidate.signals.duration_score,
+                "text_score": candidate.signals.text_score,
+                "visual_score": candidate.signals.visual_score,
+            },
+            "metadata": dict(candidate.metadata),
+        }
+
     def execute(self, action: AgentAction) -> None:
         transitions = {
             ActionType.SEARCH: AgentState.SEARCH,
@@ -139,11 +155,18 @@ class Agent:
                 raise InvalidTransitionError(
                     f"Invalid transition for BACK: {self.state.value} -> back"
                 )
-            self.adapter.back()
+            restored = self.adapter.back()
             if self.session is not None:
                 self.session.record_action(action)
             self.transition(AgentState.OBSERVE)
-            self._create_observation(current_item_id=None, preserve=True)
+            if restored is None:
+                self._create_observation(current_item_id=None, preserve=True)
+            else:
+                self._create_observation(
+                    current_item_id=restored.video_id,
+                    metadata={"item": self._candidate_metadata(restored)},
+                    preserve=True,
+                )
             return
 
         if action.type == ActionType.SEARCH and action.value is None:
@@ -162,6 +185,11 @@ class Agent:
             raise ValueError(
                 f"OPEN target has already been viewed in this session: {action.value}"
             )
+
+        # Stop the actual player before making STOPPED terminal. This lets the
+        # executor report a bridge failure while the state machine can recover.
+        if action.type == ActionType.STOP:
+            self.adapter.stop_playback()
 
         if self.state == AgentState.OBSERVE:
             self.transition(AgentState.DECIDE)
@@ -185,22 +213,7 @@ class Agent:
             opened = self.adapter.open(action.value)
             self.session.record_item(action.value)
             self.transition(AgentState.OBSERVE)
-            metadata = None
-            if opened is not None:
-                metadata = {
-                    "item": {
-                        "video_id": opened.video_id,
-                        "title": opened.title,
-                        "channel": opened.channel,
-                        "duration_seconds": opened.duration_seconds,
-                        "signals": {
-                            "duration_score": opened.signals.duration_score,
-                            "text_score": opened.signals.text_score,
-                            "visual_score": opened.signals.visual_score,
-                        },
-                        "metadata": dict(opened.metadata),
-                    }
-                }
+            metadata = {"item": self._candidate_metadata(opened)} if opened is not None else None
             self._create_observation(
                 current_item_id=action.value,
                 metadata=metadata,
@@ -208,9 +221,19 @@ class Agent:
             )
 
         elif action.type == ActionType.SCROLL:
-            self.adapter.scroll()
+            advanced = self.adapter.scroll()
+            if advanced is not None:
+                self.session.record_item(advanced.video_id)
             self.transition(AgentState.OBSERVE)
-            self._create_observation(preserve=True)
+            if advanced is None:
+                # Existing mock/metadata-only adapters can still return None.
+                self._create_observation(preserve=True)
+            else:
+                self._create_observation(
+                    current_item_id=advanced.video_id,
+                    metadata={"item": self._candidate_metadata(advanced)},
+                    preserve=True,
+                )
 
         elif action.type == ActionType.EXPLORE:
             candidates = self.adapter.search(action.value)
@@ -240,12 +263,7 @@ class Agent:
         *,
         executor: ActionExecutor | None = None,
     ) -> None:
-        """
-        Run a bounded planner/action loop through the deterministic executor.
-
-        Tests can inject an executor/event sink; production runs use the same
-        validated boundary by default.
-        """
+        """Run a bounded planner/action loop through the deterministic executor."""
         executor = executor or ActionExecutor(self)
         action = initial_action
         for _ in range(max_steps):

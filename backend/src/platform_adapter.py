@@ -21,25 +21,28 @@ class PlatformAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def scroll(self) -> None:
-        """Move to the next content position."""
+    def scroll(self) -> VideoCandidate | None:
+        """Move to the next content position when supported."""
         raise NotImplementedError
 
     @abstractmethod
     def open(self, item_id: str) -> VideoCandidate | None:
-        """
-        Open a content item and return available normalized item data.
-
-        A platform may return None when opening does not provide metadata.
-        """
+        """Open a content item and return its normalized item data, if available."""
         raise NotImplementedError
 
     @abstractmethod
-    def back(self) -> None:
-        """Return to the previous view."""
+    def back(self) -> VideoCandidate | None:
+        """Return to the previous view when supported."""
         raise NotImplementedError
 
     @abstractmethod
     def wait(self) -> None:
         """Wait without taking another navigation action."""
         raise NotImplementedError
+
+    def stop_playback(self) -> None:
+        """Stop live playback if the adapter owns a playback surface.
+
+        Metadata-only adapters intentionally inherit this no-op implementation.
+        """
+        return None
