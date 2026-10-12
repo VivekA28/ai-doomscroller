@@ -1198,9 +1198,11 @@ checkpoint. The existing `main` branch is unchanged.
 
 ## Validation status
 
-The tests have been added but have **not yet been verified as passing** in this
-checkpoint. The current execution environment could not clone the repository
-directly to run them. Run locally from the backend directory:
+GitHub Actions verified the offline backend suite: **46 tests passed** (Python
+3.12; no live API keys required). The successful run is recorded here:
+https://github.com/VivekA28/ai-doomscroller/actions/runs/38297982165
+
+Run locally from the backend directory:
 
 ```bash
 python3 -m unittest discover -s . -p 'test_*.py' -v
